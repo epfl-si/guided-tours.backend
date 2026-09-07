@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
@@ -11,6 +12,7 @@ import { CreateReservationDto } from './dto/create.dto';
 import { UpdateReservationDto } from './dto/update.dto';
 import { ListReservationDto } from './dto/list.dto';
 import { ReadReservationDto } from './dto/read.dto';
+import { GuideAnswer, GuideInvitationDto } from './dto/guide-invitation.dto';
 import { AppLogger as Logger } from '@/logger.service';
 
 @Injectable()
@@ -179,5 +181,83 @@ export class ReservationService {
       }
       throw error;
     }
+  }
+
+  private static readonly invitationSelect = {
+    reservationId: true,
+    status: true,
+    reservation: {
+      select: {
+        date: true,
+        participantNumber: true,
+        comment: true,
+        language: { select: { id: true, name: true } },
+        place: { select: { id: true, title: true } },
+      },
+    },
+  } satisfies Prisma.ReservationGuideSelect;
+
+  async getGuideInvitation(
+    reservationId: number,
+    sciper: number,
+  ): Promise<GuideInvitationDto> {
+    const invitation = await this.prisma.reservationGuide.findUnique({
+      where: { reservationId_guideId: { reservationId, guideId: sciper } },
+      select: ReservationService.invitationSelect,
+    });
+
+    if (!invitation) {
+      this.logger.warn(
+        `No invitation for guide ${sciper} on reservation ${reservationId}`,
+      );
+      throw new NotFoundException(
+        `No invitation found for reservation ${reservationId}`,
+      );
+    }
+
+    this.logger.log(
+      `Read invitation of guide ${sciper} for reservation ${reservationId}`,
+    );
+    return invitation as GuideInvitationDto;
+  }
+
+  async respondToInvitation(
+    reservationId: number,
+    sciper: number,
+    status: GuideAnswer,
+  ): Promise<GuideInvitationDto> {
+    const existing = await this.prisma.reservationGuide.findUnique({
+      where: { reservationId_guideId: { reservationId, guideId: sciper } },
+      select: { status: true },
+    });
+
+    if (!existing) {
+      this.logger.warn(
+        `No invitation for guide ${sciper} on reservation ${reservationId}`,
+      );
+      throw new NotFoundException(
+        `No invitation found for reservation ${reservationId}`,
+      );
+    }
+
+    if (existing.status === 'CHOSEN') {
+      this.logger.warn(
+        `Guide ${sciper} tried to answer reservation ${reservationId} after being chosen`,
+      );
+      throw new ConflictException(
+        'This answer can no longer be changed: you have been chosen for this guided tour.',
+      );
+    }
+
+    const invitation = await this.prisma.reservationGuide.update({
+      where: { reservationId_guideId: { reservationId, guideId: sciper } },
+      data: { status, updatedAt: new Date() },
+      select: ReservationService.invitationSelect,
+    });
+
+    this.logger.log(
+      `Guide ${sciper} answered ${status} for reservation ${reservationId}`,
+    );
+    return invitation as GuideInvitationDto;
   }
 }

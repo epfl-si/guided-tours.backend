@@ -23,6 +23,11 @@ import { Prisma } from '../../generated/prisma/client';
 import { AzureAdGuard } from '../auth/azure-ad-auth.guard';
 import { GroupsGuard } from '../guards/groups.guard';
 import { RequireGroups } from '../decorators/require-groups.decorator';
+import { Sciper } from '../decorators/sciper.decorator';
+import {
+  GuideInvitationDto,
+  RespondInvitationDto,
+} from './dto/guide-invitation.dto';
 
 @Controller({ path: 'reservations', version: '1' })
 export class ReservationController {
@@ -77,5 +82,32 @@ export class ReservationController {
   @ApiBearerAuth('access-token')
   remove(@Param('id', ParseIntPipe) id: number): Promise<void> {
     return this.reservationService.remove(id);
+  }
+
+  @Get(':id/invitation')
+  @ApiResponse({ type: GuideInvitationDto })
+  @UseGuards(AzureAdGuard)
+  @ApiBearerAuth('access-token')
+  getGuideInvitation(
+    @Param('id', ParseIntPipe) id: number,
+    @Sciper() sciper: number,
+  ): Promise<GuideInvitationDto> {
+    return this.reservationService.getGuideInvitation(id, sciper);
+  }
+
+  @Patch(':id/invitation')
+  @ApiResponse({ type: GuideInvitationDto })
+  @UseGuards(AzureAdGuard)
+  @ApiBearerAuth('access-token')
+  respondToInvitation(
+    @Param('id', ParseIntPipe) id: number,
+    @Sciper() sciper: number,
+    @Body() respondInvitationDto: RespondInvitationDto,
+  ): Promise<GuideInvitationDto> {
+    return this.reservationService.respondToInvitation(
+      id,
+      sciper,
+      respondInvitationDto.status,
+    );
   }
 }

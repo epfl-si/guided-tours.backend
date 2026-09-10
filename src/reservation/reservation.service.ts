@@ -11,14 +11,24 @@ import { CreateReservationDto } from './dto/create.dto';
 import { UpdateReservationDto } from './dto/update.dto';
 import { ListReservationDto } from './dto/list.dto';
 import { ReadReservationDto } from './dto/read.dto';
+import { GuideInvitationDto } from './dto/guide-invitation.dto';
 import { AppLogger as Logger } from '@/logger.service';
+import { GuideService } from '@/guide/guide.service';
+import { MailService } from '@/mail/mail.service';
+import { ReservationGuideAction } from './reservation-guide-action.enum';
+import { ReqEntraOauthUser } from '@/types/auth';
+import { adminGroup } from '@/constant/auth';
 
 @Injectable()
 export class ReservationService {
   private readonly logger = new Logger(ReservationService.name);
   private readonly holidays = new Holidays('CH', 'VD');
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private guide: GuideService,
+    private mail: MailService,
+  ) { }
 
   private isAtLeast7BusinessDaysBefore(visitDate: Date | string): boolean {
     const today = new Date();
@@ -44,6 +54,19 @@ export class ReservationService {
     }
 
     return businessDays >= 7;
+  }
+
+  private async createGuideToReservation(
+    idReservation: number,
+    guideIds: number[],
+  ) {
+    await this.prisma.reservationGuide.createMany({
+      data: guideIds.map((guideId) => ({
+        guideId,
+        status: 'WAITING',
+        reservationId: idReservation,
+      })),
+    });
   }
 
   async list(
@@ -76,9 +99,20 @@ export class ReservationService {
     return reservations;
   }
 
-  async read(id: number): Promise<ReadReservationDto> {
-    const reservation = await this.prisma.reservation.findUnique({
-      where: { id },
+  async read(id: number, user: ReqEntraOauthUser): Promise<ReadReservationDto> {
+    const isAdmin = user.groups.includes(adminGroup);
+
+    const reservation = await this.prisma.reservation.findFirst({
+      where: isAdmin
+        ? { id }
+        : {
+          id, reservationGuides: {
+            some: {
+              guideId: Number(user.uniqueid)
+            }
+          }
+        },
+      include: { reservationGuides: true },
     });
 
     if (!reservation) {
@@ -135,6 +169,22 @@ export class ReservationService {
     });
 
     this.logger.log(`Created reservation ${reservation.id}`);
+
+    const compatibleGuidesIds = await this.guide.findGuideForReservation(
+      reservation.id,
+    );
+
+    await this.createGuideToReservation(reservation.id, compatibleGuidesIds);
+
+    await this.mail.notifyGuide(compatibleGuidesIds, {
+      url: process.env.FRONTEND_URL + `/reservations/${reservation.id}`,
+      date: reservation.date,
+      language: language.name,
+      place: (place.title as { fr: string }).fr,
+      numberOfGuide: Math.ceil(reservation.participantNumber / place.capacity),
+      participantsNumber: reservation.participantNumber,
+    });
+
     return reservation;
   }
 
@@ -160,6 +210,69 @@ export class ReservationService {
       }
       throw error;
     }
+  }
+
+  private static readonly invitationSelect = {
+    reservationId: true,
+    status: true,
+    reservation: {
+      select: {
+        date: true,
+        participantNumber: true,
+        comment: true,
+        language: { select: { id: true, name: true } },
+        place: { select: { id: true, title: true } },
+      },
+    },
+  } satisfies Prisma.ReservationGuideSelect;
+
+  async getGuideInvitation(
+    id: number,
+    sciper: number,
+  ): Promise<GuideInvitationDto> {
+    const invitation = await this.prisma.reservationGuide.findUnique({
+      where: { reservationId_guideId: { reservationId: id, guideId: sciper } },
+      select: ReservationService.invitationSelect,
+    });
+    if (!invitation) {
+      this.logger.warn(`No invitation for guide ${sciper} on reservation ${id}`);
+      throw new NotFoundException(
+        `No invitation found for guide ${sciper} on reservation ${id}`,
+      );
+    }
+
+    return invitation as GuideInvitationDto;
+  }
+
+  async respondToInvitation(
+    id: number,
+    action: ReservationGuideAction,
+    sciper: number,
+  ) {
+    const status = action === ReservationGuideAction.ACCEPT ? 'ACCEPTED' : 'DECLINED';
+
+    try {
+      await this.prisma.reservationGuide.update({
+        where: {
+          reservationId_guideId: { reservationId: id, guideId: sciper }, status: { not: 'CHOSEN' }
+        },
+        data: { status, updatedAt: new Date() },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException(
+          `No invitation found for guide ${sciper} on reservation ${id}`,
+        );
+      }
+      throw error;
+    }
+
+    this.logger.log(`Reservation ${id} ${status.toLowerCase()} by guide ${sciper}`);
+
+    return
   }
 
   async remove(id: number): Promise<void> {
